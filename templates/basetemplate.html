@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>KinectMovie Server</title>
+		<meta http-equiv="refresh" content="5; url={{ baseURL }}">
+		<style>
+			body {
+				background-color: #0A0A0A;
+				color: #CC6F6F;
+				font-family: verdana;
+			}
+			thead>tr>td {
+				padding-right: 1em;
+			}
+			.sum {
+				font-weight: bold;
+			}
+		</style>
+	</head>
+	<body>
+		<h1>KinectMovie Server</h1>
+
+		<h2>Scoreboard</h2>
+		<table>
+			<thead>
+				<tr>
+					<td>Filename</td>
+					<td class="sum">Sum</td>
+					{% for scoreHeader in currentClipScores[0].Scores %}
+						<td>{{ scoreHeader.Name }}</td>
+					{% endfor %}
+				</tr>
+			</thead>
+			<tbody>
+				{% for clipScore in currentClipScores %}
+					<tr>
+						<td>{{ clipScore.Movie.Filename }}</td>
+						<td  class="sum">{{ clipScore.ScoreSum }}</td>
+						{% for score in clipScore.Scores %}
+						<td title="{{ score.Comment }}">{{ score.Score }}</td>
+						{% endfor %}
+					</tr>
+				{% endfor %}
+			</tbody>
+		</table>
+		
+		<h2>Counters</h2>
+		<h3>Diff now: {{ peopleDiff }}</h3>
+		<table>
+			<thead>
+				<tr>
+					<td>&nbsp;</td>
+					<td>Kinect</td>
+					<td>Snurra</td>
+				</tr>
+			</thead>
+			<tbody>
+				<tr>
+					<td>Now</td>
+					<td>{{ peopleKinect }}</td>
+					<td>
+						<form method="get">
+							<input type="text" name="peopleKinect" value="{{ peopleSnurra }}" size="2" />
+						</form>
+					</td>
+				</tr>
+				<tr>
+					<td>Last</td>
+					<td>{{ peopleKinectLast }}</td>
+					<td>{{ peopleSnurraLast }}</td>
+				</tr>
+				<tr>
+					<td>Diff</td>
+					<td>{{ peopleKinectDiff }}</td>
+					<td>{{ peopleSnurraDiff }}</td>
+				</tr>
+			</tbody>
+		</table>
+
+		<h2>Factors</h2>
+		<table>
+			<thead>
+				<tr>
+					<td>Name</td>
+					<td>Value</td>
+				</tr>
+			</thead>
+			<tbody>
+				{% for factor in factorsScore %}
+				<tr>
+					<td>{{ factor }}</td>
+					<td>
+						<form method="get">
+							<input type="text" name="setfactor-{{ factor }}" value="{{ factorsScore[factor] }}" size="2" />
+						</form>
+					</td>
+				</tr>
+				{% endfor %}
+			</tbody>
+		</table>
+	</body>
+</html>
