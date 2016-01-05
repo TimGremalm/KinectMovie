@@ -297,3 +297,4 @@ if __name__ == '__main__':
 	calcNextClip()
 	calcNextClip()
 	print(playedScores[-1].Scores[0])
+
