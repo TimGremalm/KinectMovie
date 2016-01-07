@@ -2,8 +2,11 @@
 <html lang="en">
 	<head>
 		<title>KinectMovie Server</title>
-		<meta http-equiv="refresh" content="5; url={{ baseURL }}">
+		<meta http-equiv="refresh" content="2; url={{ baseURL }}">
 		<style>
+			a {
+				text-decoration: none;
+			}
 			body {
 				background-color: #0A0A0A;
 				color: #CC6F6F;
@@ -15,10 +18,13 @@
 			.sum {
 				font-weight: bold;
 			}
+			h1>a {
+				color: #CC6F6F;
+			}
 		</style>
 	</head>
 	<body>
-		<h1>KinectMovie Server</h1>
+		<h1><a href="{{ baseURL }}">KinectMovie Server</a></h1>
 
 		<h2>Scoreboard</h2>
 		<table>
@@ -43,6 +49,8 @@
 				{% endfor %}
 			</tbody>
 		</table>
+		<a href="{{ baseURL }}?ForceNext=1">Force next</a>
+		<p>Playing: {{ playStatus }}</p>
 		
 		<h2>Counters</h2>
 		<h3>Diff now: {{ peopleDiff }}</h3>

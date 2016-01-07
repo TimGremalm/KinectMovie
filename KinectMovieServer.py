@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: UTF-8 -*-
 #python3 -i KinectMovieServer.py
-import os, threading, time, requests, re, operator, json
+import os, threading, time, requests, re, operator, json, subprocess
 from random import randint
 from flask import Flask, render_template, request
 from jinja2 import Environment, FileSystemLoader
@@ -9,6 +9,10 @@ env = Environment(loader=FileSystemLoader('templates'))
 
 flaskThread = None
 flaskApp = Flask(__name__)
+
+playThread = None
+forceNext = False
+recalcNext = False
 
 #globals
 factorsScore = {}
@@ -19,17 +23,20 @@ stillOrMovingCount = 0
 stillOrMovingMax = 2
 peopleDiff = 0
 
-#urlKinectCounter = "http://192.168.4.158:8080/"
-urlKinectCounter = "http://tim.gremalm.se/a"
+urlKinectCounter = "http://192.168.4.158:8080/"
+#urlKinectCounter = "http://tim.gremalm.se/a"
 peopleKinect = 0
 peopleKinectLast = 0
 peopleKinectDiff = 0
 
-#urkSnurraCounter = "http://192.168.4.20:5000/"
-urlSnurraCounter = "http://tim.gremalm.se/b"
+urlSnurraCounter = "http://192.168.4.20:5000/"
+#urlSnurraCounter = "http://tim.gremalm.se/b"
 peopleSnurra = 0
 peopleSnurraLast = 0
 peopleSnurraDiff = 0
+
+urlProjectorAremo = "http://192.168.4.100:6000/"
+urlProjectorStallberg = "http://192.168.4.100:6001/"
 
 class FileClipPart:
 	#Filename-formating:
@@ -42,6 +49,8 @@ class FileClipPart:
 	#RunScriptAfter - Script to be executed after clip
 	#Sverige/Uganda Ställberg/Aremo
 	#Still/Moving
+	#Duration - In seconds
+	#Early start - In seconds, to start a clip earlier then the previous clip have ended
 	#Comment - Any freeetext, like 'Vaskar guld'
 	#ext - Extension of filename, ex. mp4, mov, avi
 	def __init__(self, iFilename, path):
@@ -49,7 +58,7 @@ class FileClipPart:
 		self.Path = path
 		os.pathsep
 		fileParts = str.split(self.Filename, "-")
-		if len(fileParts) != 8:
+		if len(fileParts) != 10:
 			self.Valid = False
 		else:
 			self.Valid = True
@@ -60,11 +69,12 @@ class FileClipPart:
 				self.RunScriptWhile = fileParts[3]
 				self.RunScriptAfter = fileParts[4]
 				self.Land = fileParts[5]
-				self.StillMoving = fileParts[6]
-				fileEnd = str.split(fileParts[7], ".", 1)
+				self.StillMoving = fileParts[6].lower()
+				self.ClipDuration = int(fileParts[7])
+				self.ClipEarlyStart = int(fileParts[8])
+				fileEnd = str.split(fileParts[9], ".", 1)
 				self.Comment = fileEnd[0]
 				self.Extension = fileEnd[1]
-				self.ClipLength = 0
 
 			except ValueError:
 				self.Valid = False
@@ -132,13 +142,74 @@ class scoreRandom(scoreBase):
 		self.Name = 'Random'
 		self.Score = randint(0, factorsScore[self.Name])
 
+class scorePersonsMinMax(scoreBase):
+	def __init__(self, movie):
+		self.Name = 'PersonsMinMax'
+		if peopleDiff >= movie.PersonsMin:
+			if peopleDiff <= movie.PersonsMin:
+				self.Score = factorsScore[self.Name]
+		self.Comment = "Movie limit is %s-%s, people in is %d" % (movie.PersonsMin, movie.PersonsMax, peopleDiff)
+
+def limitUpper(value, limit):
+	out = value
+	if out > limit:
+		out = limit
+	return out
+
+class scoreLastPlayed(scoreBase):
+	def __init__(self, movie):
+		self.Name = 'LastPlayed'
+		#Loop through previous played clip to find when last played
+		now = time.time()
+		last = 0
+		for playedScore in playedScores:
+			if playedScore.Scores[0].Movie.Filename == movie.Filename:
+				last = playedScore.Scores[0].TimePlayed
+				#print("%s have been played before %s" % (movie.Filename, last))
+		if last > 0:
+			diff = now-last
+			diffLimited = limitUpper(diff, factorsScore['LastPlayedMaxTime'])
+			ratio = diffLimited / factorsScore['LastPlayedMaxTime']
+			diffScore = ratio * factorsScore[self.Name]
+			self.Score = int(diffScore)
+			self.Comment = "Was last played %s seconds ago" % (int(diff))
+		else:
+			self.Score = factorsScore[self.Name]
+			self.Comment = "Has never been played"
+
+def calcTimeToPlay(mov):
+	ret = 0
+	if len(playedScores) == 0:
+		#No clip is playing, set starttime to now
+		ret = time.time()
+	else:
+		#At least one clip has been played
+		#Set start-time to previous starttime + it's length
+		activeClip = playedScores[-1].Scores[0]
+		if mov.Land == activeClip.Movie.Land:
+			switchArSt = False
+		else:
+			switchArSt = True
+
+		#If switching between aremo and stallberg, add possible early start
+		if switchArSt:
+			ret = activeClip.TimePlayed + activeClip.Movie.ClipDuration - activeClip.Movie.ClipEarlyStart
+		else:
+			ret = activeClip.TimePlayed + activeClip.Movie.ClipDuration
+
+	return(ret)
+
 class clipScore:
 	def __init__(self, movie):
 		self.Movie = movie
 		self.Scores = []
 		self.ScoreSum = 0
 		self.calcScores()
-		self.TimePlayed = time.time()
+		self.TimePlayed = calcTimeToPlay(self.Movie)
+		self.StartedPlaying = False
+		self.CalculatedNext = False
+		self.LastKinect = peopleKinect
+		self.LastSnurra = peopleSnurra
 	def __repr__(self):
 		return(self.ScoreSum)
 	def __str__(self):
@@ -150,6 +221,8 @@ class clipScore:
 		self.Scores.append(scoreStillMoving(self.Movie))
 		self.Scores.append(scoreIncreaseDecrease(self.Movie))
 		self.Scores.append(scoreRandom(self.Movie))
+		self.Scores.append(scorePersonsMinMax(self.Movie))
+		self.Scores.append(scoreLastPlayed(self.Movie))
 
 		#Calculate total sum of scores
 		for score in self.Scores:
@@ -184,7 +257,7 @@ def calcStillOrMoving():
 		stillOrMovingMax = randint(2, 3)
 
 def getHttpAsInt(url):
-	r = requests.get(url, verify=False, timeout=0.5)
+	r = requests.get(url, verify=False, timeout=0.9)
 	ret = 0
 	if r.status_code == 200: #HTTP_OK
 		m = re.search('^(\d+)', r.text)
@@ -194,20 +267,38 @@ def getHttpAsInt(url):
 
 def getKinectPersons():
 	global peopleKinect, peopleKinectLast, peopleKinectDiff
-	peopleKinect = getHttpAsInt(urlKinectCounter)
+	try:
+		peopleKinect = getHttpAsInt(urlKinectCounter)
+	except:
+		print("Opps timeout getKinectPersons, lets continue")
+		peopleKinect = peopleKinectLast
+		pass
+	if len(playedScores) > 0:
+		peopleKinectLast = playedScores[-1].Scores[0].LastKinect
+	else:
+		peopleKinectLast = 0
 	peopleKinectDiff = peopleKinect - peopleKinectLast
-	peopleKinectLast = peopleKinect
-		
+
 def getSnurraPersons():
 	global peopleSnurra, peopleSnurraLast, peopleSnurraDiff
-	peopleSnurra = getHttpAsInt(urlSnurraCounter)
+	try:
+		peopleSnurra = getHttpAsInt(urlSnurraCounter)
+	except:
+		print("Opps timeout getSnurraPersons, lets continue")
+		peopleSnurra = peopleSnurraLast
+		pass
+	if peopleSnurra < 0:
+		peopleSnurra = 0
+	if len(playedScores) > 0:
+		peopleSnurraLast = playedScores[-1].Scores[0].LastSnurra
+	else:
+		peopleSnurraLast = 0
 	peopleSnurraDiff = peopleSnurra - peopleSnurraLast
-	peopleSnurraLast = peopleSnurra
 
 def calcDiffOnMaxSnurraKinect():
 	#Calculate choose the diff of the meaurement of most people in
 	global peopleDiff
-	if peopleKinect >= peopleSnurra:
+	if abs(peopleKinectDiff) >= abs(peopleSnurraDiff):
 		peopleDiff = peopleKinectDiff
 	else:
 		peopleDiff = peopleSnurraDiff
@@ -222,8 +313,15 @@ def prepData():
 	#print("peopleDiff: %d" % (peopleDiff))
 
 def setSnurrCounter(int):
-	peopleSnurra = int
-	prepData()
+	setUrl = "%ssetPeople/%s" % (urlSnurraCounter, int)
+	#print("Trying "+setUrl)
+	try:
+		peopleSnurraResponse = getHttpAsInt(setUrl)
+		#print("Response: %s" % peopleSnurraResponse)
+		prepData()
+	except:
+		print("Opps timeout setSnurrCounter, lets continue")
+		pass
 
 def calcNextClip():
 	prepData()
@@ -238,16 +336,19 @@ def writeScoreFactorToFile():
 
 def readScoreFactorFromFile():
 	global factorsScore
-	with open('factorsScore.json', 'r') as f:
-		try:
+	try:
+		with open('factorsScore.json', 'r') as f:
 			factorsScore = json.load(f)
 		# if the file is empty the ValueError will be thrown
-		except ValueError:
-			factorsScore = {
-				'StillMoving': 100,
-				'IncreaseDecrease': 100,
-				'Random': 10
-			}
+	except (ValueError, FileNotFoundError) as e:
+		factorsScore = {
+			'StillMoving': 100,
+			'IncreaseDecrease': 100,
+			'Random': 10,
+			'PersonsMinMax': 100,
+			'LastPlayed': 100,
+			'LastPlayedMaxTime': 600
+		}
 
 def handleCommads(args):
 	for arg in args:
@@ -256,6 +357,8 @@ def handleCommads(args):
 		if arg == "peopleKinect":
 			if isInt(value):
 				setSnurrCounter(int(value))
+		if arg == "ForceNext":
+			ForceNextClip()
 		#Check if we're trying to set factor
 		if str(arg).startswith("setfactor-"):
 			if isInt(value):
@@ -276,14 +379,104 @@ def defaultRoute():
 		'peopleKinectDiff': peopleKinectDiff,
 		'peopleSnurraDiff': peopleSnurraDiff,
 		'peopleDiff': peopleDiff,
-		'baseURL': 'http://127.0.0.1:8080/',
+		'baseURL': 'http://192.168.4.100:8080/',
 		'currentClipScores': playedScores[-1],
-		'factorsScore': factorsScore
+		'factorsScore': factorsScore,
+		'playStatus': getTimeplayed()
     }
 	return template.render(templateValues)
 
+def getTimeplayed():
+	if len(playedScores) > 0:
+		activeClip = playedScores[-1].Scores[0]
+		diff = time.time() - activeClip.TimePlayed
+		m, s = divmod(diff, 60)
+		played = "%02d:%02d" % (m, s)
+
+		m, s = divmod(activeClip.Movie.ClipDuration, 60)
+		playtime = "%02d:%02d" % (m, s)
+
+		ret = "%s / %s" % (played, playtime)
+	else:
+		ret = "N/A"
+	return(ret)
+
+def ForceNextClip():
+	print("Force next clip")
+	activeClip = playedScores[-1].Scores[0]
+	activeClip.TimePlayed = time.time() - activeClip.Movie.ClipDuration
+
+def executeAndWait(pathScript):
+	p = subprocess.Popen(['python', pathScript],
+			stdout=subprocess.PIPE,
+			stderr=subprocess.PIPE)
+	out, err = p.communicate()
+	return(out)
+
+def playLoop():
+	processWhile = None
+	while 1:
+		activeClip = playedScores[-1].Scores[0]
+
+		#Started playing active clip yet?
+		if activeClip.StartedPlaying == False:
+			#Time to start yet?
+			if time.time() >= activeClip.TimePlayed:
+				if activeClip.Movie.RunScriptBefore:
+					print("RunScriptBefore %s" % activeClip.Movie.RunScriptBefore)
+					pathToRun = "./data/%s" % activeClip.Movie.RunScriptBefore
+					print(executeAndWait(pathToRun))
+
+				if activeClip.Movie.RunScriptWhile:
+					print("RunScriptWhile Start %s" % activeClip.Movie.RunScriptWhile)
+					pathToRun = "./data/%s" % activeClip.Movie.RunScriptWhile
+					processWhile = subprocess.Popen(['python', pathToRun], shell=True)
+				else:
+					processWhile = None
+
+				print("Send start play %s" % activeClip.Movie.Filename)
+				print("Clip should start %s, time is %s"%(activeClip.TimePlayed, time.time()))
+
+				#Reset starttime to now, if clip was delayed
+				activeClip.TimePlayed = time.time()
+
+				#Which projector to send to?
+				if activeClip.Movie.Land == "ar":
+					url = "%splay/%s/" % (urlProjectorAremo, activeClip.Movie.Filename)
+				if activeClip.Movie.Land == "st":
+					url = "%splay/%s/" % (urlProjectorStallberg, activeClip.Movie.Filename)
+				print(url)
+				try:
+					getHttpAsInt(url)
+					activeClip.StartedPlaying = True
+				except:
+					print("Opps timeout play, lets try again")
+					pass
+
+
+		#Time to calculate next movie?
+		if activeClip.CalculatedNext == False:
+			if time.time() >= activeClip.TimePlayed + activeClip.Movie.ClipDuration - 2:
+				if processWhile:
+					print("RunScriptWhile End")
+					processWhile.kill()
+					processWhile = None
+
+				if activeClip.Movie.RunScriptAfter:
+					print("RunScriptAfter %s" % activeClip.Movie.RunScriptAfter)
+					pathToRun = "./data/%s" % activeClip.Movie.RunScriptAfter
+					print(executeAndWait(pathToRun))
+
+				print("Calculate next")
+				calcNextClip()
+				activeClip.CalculatedNext = True
+
+		#print(activeClip.StartedPlaying)
+		time.sleep(1)
 
 if __name__ == '__main__':
+	global flaskThread, playThread
+
 	print("KinectMovieServer")
 	print("=================")
 
@@ -292,9 +485,14 @@ if __name__ == '__main__':
 	flaskThread = threading.Thread(target=flaskApp.run, kwargs={'host': '0.0.0.0', 'port': 8080, 'use_reloader':False, 'debug': True})
 	flaskThread.start()
 
+	print("Reading config file")
 	readScoreFactorFromFile()
 
 	calcNextClip()
-	calcNextClip()
-	print(playedScores[-1].Scores[0])
+
+	print("Starting play loop")
+	playThread = threading.Thread(target=playLoop, args=())
+	playThread.start()
+
+	print(time.time())
 
