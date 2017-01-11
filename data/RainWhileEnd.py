@@ -15,9 +15,4 @@ def getHttpAsInt(url):
 	return ret
 
 print("Rain")
-while 1:
-	getHttpAsInt(servoAddress+"open")
-	time.sleep(10)
-
-	getHttpAsInt(servoAddress+"close")
-	time.sleep(30)
+getHttpAsInt(servoAddress+"close")
